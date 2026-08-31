@@ -1,0 +1,5 @@
+# Copy to `redaction.local` (gitignored). One `pattern = category` per line.
+# These are the vendors YOUR agents call. Keeping them here rather than in the
+# shipped rule list means the redactor does not become a profile of you.
+(examplebroker|exampleexchange) = market-data-vendor
+(examplejobs|examplehire)       = recruiting-api

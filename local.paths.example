@@ -1,0 +1,4 @@
+# Copy to `local.paths` (gitignored) and fill in for your machine.
+# Specs reference $SOURCE_REPO rather than naming a private repository in a public tree.
+SOURCE_REPO=/absolute/path/to/the/repo/holding/dev_pipeline.py
+CODEX_BIN=~/.npm-global/bin/codex

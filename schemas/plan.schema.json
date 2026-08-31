@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Planning node artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["steps"],
+  "properties": {
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

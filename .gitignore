@@ -1,0 +1,16 @@
+# Event dumps carry verbatim tool-call excerpts, which include credentials in
+# cleartext. events.jsonl currently contains a live API key 1,530 times.
+# Never commit these.
+*.jsonl
+
+__pycache__/
+*.pyc
+
+# report.md is generated and is currently clean, but it is derived from the same
+# excerpts. Re-check it before committing a regenerated copy:
+#   grep -nE '(API_KEY|SECRET|TOKEN|PASSWORD)=[A-Za-z0-9-]{8,}' report.md
+
+# Machine-specific policy and local paths
+policy.json
+local.paths
+redaction.local

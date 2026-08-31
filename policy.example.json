@@ -1,0 +1,30 @@
+{
+  "policy_version": "0.1",
+  "_comment": "Default-deny. Copy to policy.json and edit for your machine; policy.json is gitignored because it describes your filesystem. Write it after reading a scan, not before - an allowlist guessed in advance is theatre.",
+  "allowed_write_roots": [
+    "~/code",
+    "~/Documents",
+    "/tmp"
+  ],
+  "protected_paths": [
+    "~/.ssh",
+    "~/.aws",
+    "~/.claude/settings.json",
+    "~/Library/LaunchAgents"
+  ],
+  "egress_allowlist": [
+    "api.anthropic.com",
+    "github.com",
+    "raw.githubusercontent.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "registry.npmjs.org"
+  ],
+  "allowed_mcp_servers": {},
+  "_allowed_mcp_servers_comment": "Empty = default-deny. Fill from the scan's MCP inventory, naming what each server can actually reach.",
+  "accepted_signals": [
+    "runtime.commit",
+    "network.git_remote"
+  ],
+  "_accepted_signals_comment": "Signals you have decided are fine for these agents. Everything else in scan.SIGNALS is a violation when it appears."
+}

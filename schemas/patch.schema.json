@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generation, fixing and test-generation node artifact",
+  "description": "changed_files is declared by the handler and parsed independently from the diff by the control plane. The two must match exactly; disagreement rejects the artifact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["patch", "changed_files"],
+  "properties": {
+    "patch": { "type": "string", "minLength": 1 },
+    "changed_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
