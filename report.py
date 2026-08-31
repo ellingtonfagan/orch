@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 
 from gates import Violation
+from orch.ground_truth import audit_events
 from scan import Event
 from score import PROVISIONAL, SEVERITIES, session_radius, severity
 
@@ -48,6 +49,17 @@ def render(events: list[Event], violations: list[Violation]) -> str:
     lines += ["### Capability signals", ""]
     lines += _table(signals.most_common(), ("signal", "calls"))
 
+    mode_sources = Counter(e.mode_source for e in events)
+    lines += ["### Permission mode attribution", ""]
+    lines += _table(
+        sorted(mode_sources.items(), key=lambda x: (x[0] != "unknown", x[0])),
+        ("mode_source", "calls"),
+    )
+
+    subagents = Counter(e.agent_type for e in executed if e.agent_type)
+    lines += ["### Subagent reach attribution", ""]
+    lines += _table(subagents.most_common(), ("agent type", "calls"))
+
     lines += ["## Violations", ""]
     by_gate: dict[str, list[Violation]] = defaultdict(list)
     for v in violations:
@@ -83,9 +95,58 @@ def render(events: list[Event], violations: list[Violation]) -> str:
     rows.sort(key=lambda r: (-r[3], -r[4]))
     lines += _table(rows[:30], ("session", "project", "worst", "distinct capabilities", "violations"))
 
+    lines += ["## Ground truth disagreement", ""]
+    ground_truth = audit_events(executed)
+    claimed_absent = sum(len(r.claimed_but_absent) for r in ground_truth)
+    present_unclaimed = sum(len(r.present_but_unclaimed) for r in ground_truth)
+    unattributed_dirty = sum(len(r.unattributed_dirty) for r in ground_truth)
+    not_measured = sum(1 for r in ground_truth if not r.present_side_measured)
+    lines += _table(
+        [
+            ("audited_sessions", len(ground_truth)),
+            ("claimed-but-absent", claimed_absent),
+            ("present-but-unclaimed", present_unclaimed),
+            ("unattributed-dirty-excluded", unattributed_dirty),
+            ("not-measured-sessions", not_measured),
+        ],
+        ("direction", "count"),
+    )
+    lines += [
+        "Current working-tree and index paths are excluded as unattributed_dirty because git gives "
+        "them no timestamp that ties them to a historical session.",
+        "",
+    ]
+    lines += _table(
+        [
+            (
+                r.session[:8],
+                r.project[:38],
+                len(r.claimed_writes),
+                len(r.present_changes),
+                len(r.unattributed_dirty),
+                "measured" if r.present_side_measured else "not-measured",
+                len(r.claimed_but_absent),
+                len(r.present_but_unclaimed) if r.present_side_measured else "not-measured",
+            )
+            for r in ground_truth[:30]
+        ],
+        (
+            "session",
+            "project",
+            "claimed writes",
+            "present changes",
+            "excluded dirty",
+            "present side",
+            "claimed-but-absent",
+            "present-but-unclaimed",
+        ),
+    )
+
     lines += ["## What this does not see", "",
-              "- Reach the transcript never recorded: anything a subagent did in its own context, "
-              "and anything a hook ran outside a tool call.",
+              "- Reach outside a tool call is invisible: subprocesses spawned by scripts, build steps, "
+              "hooks, and other side effects that no tool call records.",
+              "- Subagent reach is included when its transcript exists; missing or rotated transcripts "
+              "remain outside the evidence set.",
               "- Whether a credential was actually *used*, only that a path or variable name touched one.",
               "- Sessions from before transcript logging, or transcripts already rotated out.",
               "- Blast radius of a tool call that succeeded but whose effect landed elsewhere "
