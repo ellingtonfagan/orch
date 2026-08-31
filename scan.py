@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -63,6 +64,10 @@ class Event:
     mcp_server: str | None = None
     errored: bool = False          # denied or failed -> reached for, did not reach
     excerpt: str = ""
+    mode_source: str = "unknown"   # permissionMode | unknown
+    agent_type: str | None = None
+    spawn_depth: int | None = None
+    parent_tool_use_id: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -84,8 +89,67 @@ def _errored_tool_ids(records: list[dict]) -> set[str]:
     for record in records:
         for block in _blocks(record):
             if block.get("type") == "tool_result" and block.get("is_error"):
-                bad.add(block.get("tool_use_id"))
+                tool_use_id = block.get("tool_use_id")
+                if tool_use_id:
+                    bad.add(tool_use_id)
     return bad
+
+
+def _top_level_project_dir(path: Path) -> Path:
+    """Return Claude's top-level project directory for normal and subagent files."""
+    if path.parent.name == "subagents" and len(path.parents) >= 3:
+        return path.parents[2]
+    return path.parent
+
+
+def _project_from_cwd(path: Path, cwd: str) -> str:
+    """Name the project from the transcript's own cwd, falling back to Claude's directory."""
+    if cwd:
+        name = Path(cwd).expanduser().name
+        if name:
+            return name
+    return _top_level_project_dir(path).name
+
+
+def _subagent_meta(path: Path) -> dict:
+    """Sidecar attribution is evidence about delegation, not policy judgement."""
+    if path.parent.name != "subagents":
+        return {}
+    meta_path = path.with_suffix(".meta.json")
+    try:
+        return json.loads(meta_path.read_text(errors="replace"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _bash_write_targets(command: str) -> list[str]:
+    """Best-effort Bash write targets from redirects and heredoc-bearing commands."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return []
+
+    targets: list[str] = []
+    redirect = re.compile(r"^(?:(?:\d+)?>>|(?:\d+)?>\||(?:\d+)?>|&>)(.+)?$")
+    for i, token in enumerate(tokens):
+        match = redirect.match(token)
+        if not match:
+            continue
+        attached = match.group(1)
+        target = attached if attached else tokens[i + 1] if i + 1 < len(tokens) else ""
+        if target and not target.startswith("&"):
+            targets.append(target)
+
+    for i, token in enumerate(tokens):
+        if token == "tee":
+            for candidate in tokens[i + 1:]:
+                if candidate.startswith("-"):
+                    continue
+                if candidate in {"|", "&&", ";"}:
+                    break
+                targets.append(candidate)
+
+    return sorted(set(targets))
 
 
 def _classify(tool: str, tool_input: dict) -> tuple[str, list[str], list[str], list[str], str | None]:
@@ -114,7 +178,7 @@ def _classify(tool: str, tool_input: dict) -> tuple[str, list[str], list[str], l
 
     if tool == "Bash":
         command = tool_input.get("command", "")
-        return "exec", [], hosts, _signals_for(command), None
+        return "exec", _bash_write_targets(command), hosts, _signals_for(command), None
 
     if tool in {"Agent", "Workflow", "Task"}:
         # A subagent inherits the parent's reach without re-approving it.
@@ -132,16 +196,21 @@ def scan_file(path: Path) -> list[Event]:
             continue
 
     errored = _errored_tool_ids(records)
-    project = path.parent.name
     mode = "unknown"
+    mode_source = "unknown"
+    cwd = ""
+    meta = _subagent_meta(path)
     events: list[Event] = []
 
     for record in records:
-        # Mode records are emitted inline; carry the last one forward. A run in
-        # bypassPermissions is ambient authority by definition.
-        if record.get("type") == "mode" and record.get("mode"):
-            mode = record["mode"]
-            continue
+        if record.get("cwd"):
+            cwd = record.get("cwd", "")
+
+        # The standalone mode record is not orderable against tool calls. The
+        # permissionMode field on user records is the stream-positioned source.
+        if record.get("type") == "user" and record.get("permissionMode"):
+            mode = record["permissionMode"]
+            mode_source = "permissionMode"
 
         for block in _blocks(record):
             if block.get("type") != "tool_use":
@@ -153,8 +222,8 @@ def scan_file(path: Path) -> list[Event]:
             events.append(Event(
                 ts=record.get("timestamp", ""),
                 session=record.get("sessionId", path.stem),
-                project=project,
-                cwd=record.get("cwd", ""),
+                project=_project_from_cwd(path, cwd),
+                cwd=cwd,
                 git_branch=record.get("gitBranch"),
                 mode=mode,
                 tool=tool,
@@ -165,6 +234,10 @@ def scan_file(path: Path) -> list[Event]:
                 mcp_server=server,
                 errored=block.get("id") in errored,
                 excerpt=excerpt,
+                mode_source=mode_source,
+                agent_type=meta.get("agentType"),
+                spawn_depth=meta.get("spawnDepth"),
+                parent_tool_use_id=meta.get("toolUseId"),
             ))
     return events
 
@@ -172,7 +245,11 @@ def scan_file(path: Path) -> list[Event]:
 def scan_all(root: Path = TRANSCRIPT_ROOT, project_filter: str | None = None) -> list[Event]:
     events: list[Event] = []
     for path in sorted(root.rglob("*.jsonl")):
-        if project_filter and project_filter not in path.parent.name:
-            continue
-        events.extend(scan_file(path))
+        file_events = scan_file(path)
+        if project_filter:
+            file_events = [
+                e for e in file_events
+                if project_filter in e.project or project_filter in e.cwd
+            ]
+        events.extend(file_events)
     return events

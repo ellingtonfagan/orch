@@ -68,8 +68,9 @@ def evaluate(events: list[Event], policy: dict) -> list[Violation]:
             gate = "G4.ambient_authority" if signal.startswith("identity.") else "G5.blast_radius"
             out.append(Violation(gate, f"{signal} in {event.tool}", event))
 
-        # G6 tenancy — reach taken while permission checks were off.
-        if event.mode in {"bypassPermissions", "acceptEdits"} and event.kind in {"exec", "fs_write", "mcp"}:
+        # G6 tenancy — bypass is unaudited reach; acceptEdits matters when it mutates state.
+        mutating = event.kind in {"exec", "fs_write", "mcp", "agent"}
+        if event.mode == "bypassPermissions" or (event.mode == "acceptEdits" and mutating):
             out.append(Violation("G6.tenancy", f"{event.kind} under mode={event.mode}", event))
 
         # G7 mcp scope — an unnamed external service is standing access by another name.
