@@ -108,7 +108,7 @@ radius in a vocabulary a security buyer recognises.
 
 This instantiates the spec-driven build loop with the gaps the playbook leaves open
 closed. Its own stated failure mode is *"writing specs faster than they get implemented"* — the
-phase plan in §5 caps the backlog at three open specs.
+phase plan in §5 keeps it to four, which the method calls fine; ten is the signal.
 
 ### 3.1 The loop
 
@@ -227,7 +227,7 @@ primary source before it ships in a report, or it ships without an ID.
 ## 5. Phases
 
 Each phase is one spec, implemented by Codex, gated by the control plane, reviewed against the
-spec. **Backlog capped at three open specs.**
+spec. **Backlog: four deep is fine, ten is the signal.**
 
 **Spec 001 — Sandbox proof.** Run a bounded Codex task under `-s workspace-write` and empirically
 determine (a) whether writes outside the working root are refused, (b) whether network egress is
@@ -266,7 +266,7 @@ is about itself.
 - **Codex version skew**: two binaries, different versions. Pin one; record which.
 - **The taxonomy IDs may be wrong.** Several came back unverified. Unchecked IDs do not ship.
 - **The backlog outruns the build** — the named failure mode of the spec-driven build loop.
-  Cap is three.
+  Four is fine; ten is the signal.
 
 ---
 

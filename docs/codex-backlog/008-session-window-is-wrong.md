@@ -68,7 +68,10 @@ that rendering; reuse it rather than inventing a second one.
 
 ---
 
-**Backlog note.** This makes four open specs against a cap of three. That cap exists because
-writing specs faster than they get implemented turns the backlog into a wish list. 008 jumps the
-queue ahead of 005-007 because it repairs shipped code that currently prints a number a reader
-would believe. Nothing new gets written until it is done.
+**Backlog note.** This makes four open specs. The governing rule is not a cap of three — that was
+an invention in an earlier draft of PLAN.md, stricter than the method it came from. The actual rule
+is: four specs deep is fine, ten is a signal the enjoyable half of the work is being done instead
+of the work. At four, the backlog is healthy.
+
+008 still jumps the queue ahead of 005-007, for a different reason than backlog size: it repairs
+shipped code that currently prints a number a reader would believe.
