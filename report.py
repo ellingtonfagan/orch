@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 
 from gates import Violation
-from orch.ground_truth import audit_events
+from orch.ground_truth import audit_events, format_duration
 from scan import Event
 from score import PROVISIONAL, SEVERITIES, session_radius, severity
 
@@ -100,6 +100,7 @@ def render(events: list[Event], violations: list[Violation]) -> str:
     claimed_absent = sum(len(r.claimed_but_absent) for r in ground_truth)
     present_unclaimed = sum(len(r.present_but_unclaimed) for r in ground_truth)
     unattributed_dirty = sum(len(r.unattributed_dirty) for r in ground_truth)
+    gap_changes = sum(len(r.gap_changes_excluded) for r in ground_truth)
     not_measured = sum(1 for r in ground_truth if not r.present_side_measured)
     lines += _table(
         [
@@ -107,6 +108,7 @@ def render(events: list[Event], violations: list[Violation]) -> str:
             ("claimed-but-absent", claimed_absent),
             ("present-but-unclaimed", present_unclaimed),
             ("unattributed-dirty-excluded", unattributed_dirty),
+            ("gap-commit-paths-excluded", gap_changes),
             ("not-measured-sessions", not_measured),
         ],
         ("direction", "count"),
@@ -114,6 +116,8 @@ def render(events: list[Event], violations: list[Violation]) -> str:
     lines += [
         "Current working-tree and index paths are excluded as unattributed_dirty because git gives "
         "them no timestamp that ties them to a historical session.",
+        "Committed paths whose author time lands between activity bursts are excluded as gap "
+        "commits, not attributed to the resumed session.",
         "",
     ]
     lines += _table(
@@ -121,9 +125,13 @@ def render(events: list[Event], violations: list[Violation]) -> str:
             (
                 r.session[:8],
                 r.project[:38],
+                r.burst_count,
+                f"{format_duration(r.measured_duration_seconds)}/"
+                f"{format_duration(r.wall_clock_span_seconds)}",
                 len(r.claimed_writes),
                 len(r.present_changes),
                 len(r.unattributed_dirty),
+                len(r.gap_changes_excluded),
                 "measured" if r.present_side_measured else "not-measured",
                 len(r.claimed_but_absent),
                 len(r.present_but_unclaimed) if r.present_side_measured else "not-measured",
@@ -133,9 +141,12 @@ def render(events: list[Event], violations: list[Violation]) -> str:
         (
             "session",
             "project",
+            "bursts",
+            "measured/span",
             "claimed writes",
             "present changes",
             "excluded dirty",
+            "excluded gap",
             "present side",
             "claimed-but-absent",
             "present-but-unclaimed",

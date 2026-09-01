@@ -20,15 +20,44 @@ if __package__ in {None, ""}:
 from scan import TRANSCRIPT_ROOT, Event, scan_all
 
 
+# Two hours separates an active work burst from a resumed session. It is wide
+# enough for long tool calls and short human pauses, but cuts out overnight or
+# multi-day gaps where unrelated commits otherwise contaminate attribution.
+ACTIVITY_BURST_GAP = timedelta(hours=2)
+WINDOW_PAD = timedelta(seconds=1)
+
+
+@dataclass(frozen=True)
+class ActivityBurst:
+    start: datetime
+    end: datetime
+
+    @property
+    def since(self) -> datetime:
+        return self.start - WINDOW_PAD
+
+    @property
+    def until(self) -> datetime:
+        return self.end + WINDOW_PAD
+
+    @property
+    def duration_seconds(self) -> float:
+        return (self.end - self.start).total_seconds()
+
+
 @dataclass
 class GroundTruthResult:
     session: str
     project: str
     cwd: str
     repo_root: str
+    burst_count: int
+    measured_duration_seconds: float
+    wall_clock_span_seconds: float
     claimed_writes: set[str]
     present_changes: set[str]
     unattributed_dirty: set[str]
+    gap_changes_excluded: set[str]
     present_side_measured: bool
     claimed_but_absent: set[str]
     present_but_unclaimed: set[str]
@@ -42,6 +71,13 @@ class GroundTruthResult:
 
 
 def _git(cwd: Path, args: list[str]) -> list[str]:
+    output = _git_output(cwd, args)
+    if output is None:
+        return []
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _git_output(cwd: Path, args: list[str]) -> str | None:
     try:
         proc = subprocess.run(
             ["git", *args],
@@ -53,10 +89,10 @@ def _git(cwd: Path, args: list[str]) -> list[str]:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return None
     if proc.returncode != 0:
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        return None
+    return proc.stdout
 
 
 def _repo_root(cwd: str) -> Path | None:
@@ -78,11 +114,39 @@ def _parse_ts(value: str) -> datetime | None:
         return None
 
 
-def _window(events: list[Event]) -> tuple[datetime | None, datetime | None]:
+def _activity_bursts(events: list[Event]) -> list[ActivityBurst]:
     stamps = [ts for ts in (_parse_ts(e.ts) for e in events) if ts is not None]
     if not stamps:
-        return None, None
-    return min(stamps) - timedelta(seconds=1), max(stamps) + timedelta(seconds=1)
+        return []
+
+    bursts: list[ActivityBurst] = []
+    ordered = sorted(stamps)
+    start = ordered[0]
+    previous = ordered[0]
+    for stamp in ordered[1:]:
+        if stamp - previous > ACTIVITY_BURST_GAP:
+            bursts.append(ActivityBurst(start=start, end=previous))
+            start = stamp
+        previous = stamp
+    bursts.append(ActivityBurst(start=start, end=previous))
+    return bursts
+
+
+def _gap_windows(bursts: list[ActivityBurst]) -> list[tuple[datetime, datetime]]:
+    gaps: list[tuple[datetime, datetime]] = []
+    for before, after in zip(bursts, bursts[1:]):
+        gaps.append((before.until, after.since))
+    return gaps
+
+
+def _wall_clock_span_seconds(bursts: list[ActivityBurst]) -> float:
+    if not bursts:
+        return 0.0
+    return (bursts[-1].end - bursts[0].start).total_seconds()
+
+
+def _measured_duration_seconds(bursts: list[ActivityBurst]) -> float:
+    return sum(burst.duration_seconds for burst in bursts)
 
 
 def _relative_to_repo(target: str, cwd: Path, repo_root: Path) -> str | None:
@@ -114,17 +178,23 @@ def claimed_write_paths(events: list[Event], cwd: Path, repo_root: Path) -> set[
     return claimed
 
 
-def _mtime_changes(repo_root: Path, since: datetime | None, until: datetime | None) -> set[str]:
-    if since is None or until is None:
-        return set()
+def _in_window(value: datetime, since: datetime, until: datetime) -> bool:
+    try:
+        return since <= value <= until
+    except TypeError:
+        return False
+
+
+def _mtime_changes(repo_root: Path, bursts: list[ActivityBurst]) -> set[str]:
     changed: set[str] = set()
     for relative in _git(repo_root, ["ls-files", "-co", "--exclude-standard"]):
         path = repo_root / relative
         try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=since.tzinfo)
+            tzinfo = bursts[0].since.tzinfo if bursts else None
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=tzinfo)
         except OSError:
             continue
-        if since <= mtime <= until:
+        if any(_in_window(mtime, burst.since, burst.until) for burst in bursts):
             changed.add(Path(relative).as_posix())
     return changed
 
@@ -135,22 +205,61 @@ def _unattributed_dirty_paths(repo_root: Path) -> set[str]:
     return {Path(path).as_posix() for path in dirty if path}
 
 
-def present_change_paths(repo_root: Path, since: datetime | None, until: datetime | None) -> set[str]:
+def _git_paths_by_author_time(
+    repo_root: Path,
+    since: datetime,
+    until: datetime,
+) -> set[str]:
+    paths: set[str] = set()
+    include_commit = False
+    output = _git_output(repo_root, ["log", "--name-only", "--pretty=format:%x1e%aI"])
+    if output is None:
+        return paths
+    for line in output.split("\n"):
+        if not line:
+            continue
+        if line.startswith("\x1e"):
+            author_time = _parse_ts(line[1:])
+            include_commit = (
+                author_time is not None and _in_window(author_time, since, until)
+            )
+            continue
+        if include_commit:
+            paths.add(Path(line.strip()).as_posix())
+    return paths
+
+
+def _gap_commit_paths(repo_root: Path, bursts: list[ActivityBurst]) -> set[str]:
+    gap_paths: set[str] = set()
+    for since, until in _gap_windows(bursts):
+        gap_paths.update(_git_paths_by_author_time(repo_root, since, until))
+    return gap_paths
+
+
+def present_change_paths(repo_root: Path, bursts: list[ActivityBurst]) -> set[str]:
     """Repository-side estimator using only windowed repository evidence."""
     present: set[str] = set()
-    if since is not None and until is not None:
-        present.update(_git(
-            repo_root,
-            [
-                "log",
-                "--name-only",
-                "--pretty=format:",
-                f"--since={since.isoformat()}",
-                f"--until={until.isoformat()}",
-            ],
-        ))
-    present.update(_mtime_changes(repo_root, since, until))
+    for burst in bursts:
+        present.update(_git_paths_by_author_time(repo_root, burst.since, burst.until))
+    present.update(_mtime_changes(repo_root, bursts))
     return {Path(path).as_posix() for path in present if path}
+
+
+def format_duration(seconds: float) -> str:
+    rounded = int(round(seconds))
+    days, remainder = divmod(rounded, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 def audit_session(events: list[Event]) -> GroundTruthResult | None:
@@ -160,19 +269,24 @@ def audit_session(events: list[Event]) -> GroundTruthResult | None:
     if repo_root is None:
         return None
     cwd = Path(cwd_value).expanduser()
-    since, until = _window(events)
+    bursts = _activity_bursts(events)
     claimed = claimed_write_paths(events, cwd, repo_root)
-    present = present_change_paths(repo_root, since, until)
+    present = present_change_paths(repo_root, bursts)
     unattributed_dirty = _unattributed_dirty_paths(repo_root)
+    gap_changes = _gap_commit_paths(repo_root, bursts)
     present_side_measured = bool(present)
     return GroundTruthResult(
         session=events[0].session,
         project=events[0].project,
         cwd=str(cwd),
         repo_root=str(repo_root),
+        burst_count=len(bursts),
+        measured_duration_seconds=_measured_duration_seconds(bursts),
+        wall_clock_span_seconds=_wall_clock_span_seconds(bursts),
         claimed_writes=claimed,
         present_changes=present,
         unattributed_dirty=unattributed_dirty,
+        gap_changes_excluded=gap_changes,
         present_side_measured=present_side_measured,
         claimed_but_absent=claimed - present,
         present_but_unclaimed=(present - claimed) if present_side_measured else set(),
@@ -199,6 +313,7 @@ def render_results(results: list[GroundTruthResult]) -> str:
     claimed_absent = sum(len(r.claimed_but_absent) for r in results)
     present_unclaimed = sum(len(r.present_but_unclaimed) for r in results)
     unattributed_dirty = sum(len(r.unattributed_dirty) for r in results)
+    gap_changes = sum(len(r.gap_changes_excluded) for r in results)
     not_measured = sum(1 for r in results if not r.present_side_measured)
     lines = [
         "# Ground Truth Disagreement",
@@ -207,12 +322,14 @@ def render_results(results: list[GroundTruthResult]) -> str:
         f"claimed-but-absent: {claimed_absent}",
         f"present-but-unclaimed: {present_unclaimed}",
         f"unattributed-dirty-excluded: {unattributed_dirty}",
+        f"gap-commit-paths-excluded: {gap_changes}",
         f"not-measured-sessions: {not_measured}",
         "",
         "unattributed-dirty-excluded are current working-tree or index paths; git gives them no session timestamp, so they are excluded from present-but-unclaimed.",
+        "gap-commit-paths-excluded are committed paths whose author time lands between activity bursts inside a resumed session's wall-clock span.",
         "",
-        "| session | project | claimed writes | present changes | excluded dirty | present side | claimed-but-absent | present-but-unclaimed |",
-        "|---|---|---|---|---|---|---|---|",
+        "| session | project | bursts | measured/span | claimed writes | present changes | excluded dirty | excluded gap | present side | claimed-but-absent | present-but-unclaimed |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:
         present_side = "measured" if result.present_side_measured else "not-measured"
@@ -221,12 +338,19 @@ def render_results(results: list[GroundTruthResult]) -> str:
         )
         lines.append(
             f"| {result.session[:8]} | {result.project[:40]} | "
+            f"{result.burst_count} | "
+            f"{format_duration(result.measured_duration_seconds)}/"
+            f"{format_duration(result.wall_clock_span_seconds)} | "
             f"{len(result.claimed_writes)} | {len(result.present_changes)} | "
-            f"{len(result.unattributed_dirty)} | {present_side} | "
+            f"{len(result.unattributed_dirty)} | {len(result.gap_changes_excluded)} | "
+            f"{present_side} | "
             f"{len(result.claimed_but_absent)} | {present_unclaimed} |"
         )
     if not results:
-        lines.append("| _none_ | _none_ | 0 | 0 | 0 | not-measured | 0 | not-measured |")
+        lines.append(
+            "| _none_ | _none_ | 0 | 0s/0s | 0 | 0 | 0 | 0 | "
+            "not-measured | 0 | not-measured |"
+        )
     return "\n".join(lines)
 
 
